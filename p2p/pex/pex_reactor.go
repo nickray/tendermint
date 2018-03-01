@@ -260,9 +260,16 @@ func (r *PEXReactor) SetEnsurePeersPeriod(d time.Duration) {
 
 // Ensures that sufficient peers are connected. (continuous)
 func (r *PEXReactor) ensurePeersRoutine() {
-	// Randomize when routine starts
-	ensurePeersPeriodMs := r.ensurePeersPeriod.Nanoseconds() / 1e6
-	time.Sleep(time.Duration(rand.Int63n(ensurePeersPeriodMs)) * time.Millisecond)
+	rand.Seed(time.Now().UnixNano())
+
+	jitter := rand.Int63n(r.ensurePeersPeriod.Nanoseconds())
+
+	// Randomize first round of communication to avoid thundering herd.
+	// If no potential peers are present directly start connecting so we guarantee
+	// swift setup with the help of configured seeds.
+	if r.hasPotentialPeers() {
+		time.Sleep(time.Duration(jitter))
+	}
 
 	// fire once immediately.
 	// ensures we dial the seeds right away if the book is empty
@@ -287,9 +294,18 @@ func (r *PEXReactor) ensurePeersRoutine() {
 // the node operator. It should not be used to compute what addresses are
 // already connected or not.
 func (r *PEXReactor) ensurePeers() {
-	numOutPeers, numInPeers, numDialing := r.Switch.NumPeers()
-	numToDial := defaultMinNumOutboundPeers - (numOutPeers + numDialing)
-	r.Logger.Info("Ensure peers", "numOutPeers", numOutPeers, "numDialing", numDialing, "numToDial", numToDial)
+	var (
+		numOutPeers, numInPeers, numDialing = r.Switch.NumPeers()
+		numToDial                           = defaultMinNumOutboundPeers - (numOutPeers + numDialing)
+	)
+	r.Logger.Info(
+		"Ensure peers",
+		"numOutPeers", numOutPeers,
+		"numInPeers", numInPeers,
+		"numDialing", numDialing,
+		"numToDial", numToDial,
+	)
+
 	if numToDial <= 0 {
 		return
 	}
@@ -302,6 +318,7 @@ func (r *PEXReactor) ensurePeers() {
 	toDial := make(map[p2p.ID]*p2p.NetAddress)
 	// Try maxAttempts times to pick numToDial addresses to dial
 	maxAttempts := numToDial * 3
+
 	for i := 0; i < maxAttempts && len(toDial) < numToDial; i++ {
 		try := r.book.PickAddress(newBias)
 		if try == nil {
@@ -412,6 +429,14 @@ func (r *PEXReactor) crawlPeersRoutine() {
 			return
 		}
 	}
+}
+
+// hasPotentialPeers indicates if there is a potential peer to connect to, by
+// consulting the Switch as well as the AddrBook.
+func (r *PEXReactor) hasPotentialPeers() bool {
+	o, i, d := r.Switch.NumPeers()
+
+	return o+i+d > 0 && len(r.book.ListOfKnownAddresses()) > 0
 }
 
 // crawlPeerInfo handles temporary data needed for the
